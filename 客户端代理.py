@@ -1,4 +1,4 @@
-# local_proxy.py
+# 客户端代理.py
 from collections import OrderedDict
 import socket
 import threading
@@ -6,190 +6,190 @@ import struct
 import time
 import traceback
 from uuid import UUID, uuid4
-import p2p_client
+import P2P客户端
 
-Detection=p2p_client.Detection.encode("utf-8")
-p2pExample=p2p_client.Run(UUID("d1585c38-8f6f-4ff6-96ee-97eb3b413619")) #d2931b0f-5d6e-47c7-81ba-db969476ad7f  #8c091f4d-482f-4489-8d0e-8cdc59c27aeb
-if not p2pExample.yes:
+探测标识=P2P客户端.探测标识.encode("utf-8")
+p2p实例=P2P客户端.运行类(UUID("d1585c38-8f6f-4ff6-96ee-97eb3b413619")) #d2931b0f-5d6e-47c7-81ba-db969476ad7f  #8c091f4d-482f-4489-8d0e-8cdc59c27aeb
+if not p2p实例.打洞成功:
     quit()
 
 # 配置（按需修改）
-LOCAL_TCP_BIND = ('0.0.0.0', 25566)   # Minecraft 客户端连到这里
-RELAY_UDP_ADDR = (p2pExample.info["ip"],p2pExample.info["port"]) # Relay 的 UDP 地址
+本地TCP绑定 = ('0.0.0.0', 25566)   # Minecraft 客户端连到这里
+中继UDP地址 = (p2p实例.对端信息["ip"],p2p实例.对端信息["port"]) # 中继服务的 UDP 地址
 
-HEADER_FMT = ">BIIHH16s"  # type(1) + conn_id(4) + seq(2) + last_flag(1)
-HEADER_SIZE = struct.calcsize(HEADER_FMT)
+头部格式 = ">BIIHH16s"  # type(1) + conn_id(4) + seq(2) + last_flag(1)
+头部大小 = struct.calcsize(头部格式)
 
-TYPE_MC = 0x01
-TYPE_ACK   = 0x02
-TYPE_CLOSE = 0x05
+类型_MC = 0x01
+类型_确认   = 0x02
+类型_关闭 = 0x05
 
-MAX_PAYLOAD = 1024  # 保守一点，避免超过UDP上限
+最大负载 = 1024  # 保守一点，避免超过UDP上限
 
-tcp_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-tcp_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-tcp_listener.bind(LOCAL_TCP_BIND)
-tcp_listener.listen(10)
+tcp监听器 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+tcp监听器.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+tcp监听器.bind(本地TCP绑定)
+tcp监听器.listen(10)
 
-conns = {}
-pending   = {}
-fragments = {}
-msg_id_s={}
-completed_msgs = OrderedDict()
-conns_lock = threading.Lock()
-msg_lock = threading.Lock()
-recvfrom_lock = threading.Lock()
+连接字典 = {}
+待确认包   = {}
+分片数据 = {}
+消息ID字典={}
+已完成消息 = OrderedDict()
+连接锁 = threading.Lock()
+消息锁 = threading.Lock()
+接收锁 = threading.Lock()
 
-_next_conn_id = 1
+_下一个连接ID = 1
 
 
-def send_fragmented(conn_id, data,uuid):
+def 发送分片数据(连接ID, 数据,uuid):
     """把大数据分片后通过UDP发送"""
-    with msg_lock:
-        msg_id=msg_id_s[(conn_id,uuid)]
-        msg_id_s[(conn_id,uuid)] = msg_id+1
-    total = (len(data)+MAX_PAYLOAD-1) // MAX_PAYLOAD
-    for seq in range(0, total):
-        chunk = data[seq*MAX_PAYLOAD:(seq+1)*MAX_PAYLOAD]
-        header = struct.pack(HEADER_FMT, TYPE_MC, conn_id, msg_id, seq, total,uuid)
-        pkt = header + chunk
-        with msg_lock:
-            pending[(conn_id, msg_id, seq ,uuid)] = (pkt, time.time())
-        p2pExample.sock.sendto(pkt, RELAY_UDP_ADDR)
+    with 消息锁:
+        消息ID=消息ID字典[(连接ID,uuid)]
+        消息ID字典[(连接ID,uuid)] = 消息ID+1
+    总数 = (len(数据)+最大负载-1) // 最大负载
+    for 序号 in range(0, 总数):
+        数据块 = 数据[序号*最大负载:(序号+1)*最大负载]
+        头部 = struct.pack(头部格式, 类型_MC, 连接ID, 消息ID, 序号, 总数,uuid)
+        数据包 = 头部 + 数据块
+        with 消息锁:
+            待确认包[(连接ID, 消息ID, 序号 ,uuid)] = (数据包, time.time())
+        p2p实例.套接字.sendto(数据包, 中继UDP地址)
 
 
-def resend_loop():
+def 重发循环():
     """定时重发未确认分片"""
     while True:
-        now = time.time()
-        with msg_lock:
-            for key, (pkt, last) in list(pending.items()):
-                if now - last > 0.1:  # 100ms 超时
-                    p2pExample.sock.sendto(pkt, RELAY_UDP_ADDR)
-                    pending[key] = (pkt, now)
+        当前时间 = time.time()
+        with 消息锁:
+            for 键, (数据包, 最后发送时间) in list(待确认包.items()):
+                if 当前时间 - 最后发送时间 > 0.1:  # 100ms 超时
+                    p2p实例.套接字.sendto(数据包, 中继UDP地址)
+                    待确认包[键] = (数据包, 当前时间)
         time.sleep(0.05)
 
 
-def gen_conn_id():
-    global _next_conn_id
-    with conns_lock:
-        cid = _next_conn_id
-        _next_conn_id = (_next_conn_id + 1) & 0xFFFFFFFF
-        if _next_conn_id == 0:
-            _next_conn_id = 1
-        return cid
+def 生成连接ID():
+    global _下一个连接ID
+    with 连接锁:
+        连接ID = _下一个连接ID
+        _下一个连接ID = (_下一个连接ID + 1) & 0xFFFFFFFF
+        if _下一个连接ID == 0:
+            _下一个连接ID = 1
+        return 连接ID
 
 
-def udp_recv_loop():
-    """统一接收来自 Relay 的 UDP，按 conn_id 分发到对应 TCP socket"""
+def udp接收循环():
+    """统一接收来自中继服务的 UDP，按连接ID分发到对应TCP socket"""
     while True:
         try:
-            with recvfrom_lock:
-                data, addr = p2pExample.sock.recvfrom(60000)
-            if not data or len(data) < HEADER_SIZE or data==Detection:
+            with 接收锁:
+                数据, 地址 = p2p实例.套接字.recvfrom(60000)
+            if not 数据 or len(数据) < 头部大小 or 数据==探测标识:
                 continue
-            t, conn_id,msg_id,seq,total,uuid = struct.unpack(HEADER_FMT, data[:HEADER_SIZE])
-            payload = data[HEADER_SIZE:]
-            with conns_lock:
-                sock = conns.get((conn_id,uuid))
-            if t == TYPE_MC:
-                if sock:
-                    if (conn_id,msg_id,uuid) in completed_msgs:
-                        # 已完成的消息：仍然回 ACK，但不再处理
-                        ack = struct.pack(HEADER_FMT, TYPE_ACK, conn_id, msg_id, seq, total,uuid)
-                        p2pExample.sock.sendto(ack, addr)
+            类型, 连接ID,消息ID,序号,总数,uuid = struct.unpack(头部格式, 数据[:头部大小])
+            负载 = 数据[头部大小:]
+            with 连接锁:
+                套接字 = 连接字典.get((连接ID,uuid))
+            if 类型 == 类型_MC:
+                if 套接字:
+                    if (连接ID,消息ID,uuid) in 已完成消息:
+                        # 已完成的消息：仍然回确认，但不再处理
+                        确认包 = struct.pack(头部格式, 类型_确认, 连接ID, 消息ID, 序号, 总数,uuid)
+                        p2p实例.套接字.sendto(确认包, 地址)
                         continue
-                    # 发 ACK
-                    ack = struct.pack(HEADER_FMT, TYPE_ACK, conn_id, msg_id, seq, total,uuid)
-                    p2pExample.sock.sendto(ack, addr)
-                    buf = fragments.setdefault((conn_id,msg_id,uuid), {})
-                    buf[seq] = payload
-                    if len(buf) == total and all(i in buf for i in range(total)): #分片集齐,开始拼接
-                        assembled = b''.join(buf[i] for i in range(total))
-                        fragments.pop((conn_id,msg_id,uuid), None)
-                        mark_completed((conn_id,msg_id,uuid))
+                    # 发确认
+                    确认包 = struct.pack(头部格式, 类型_确认, 连接ID, 消息ID, 序号, 总数,uuid)
+                    p2p实例.套接字.sendto(确认包, 地址)
+                    缓冲区 = 分片数据.setdefault((连接ID,消息ID,uuid), {})
+                    缓冲区[序号] = 负载
+                    if len(缓冲区) == 总数 and all(i in 缓冲区 for i in range(总数)): #分片集齐,开始拼接
+                        组装数据 = b''.join(缓冲区[i] for i in range(总数))
+                        分片数据.pop((连接ID,消息ID,uuid), None)
+                        标记完成((连接ID,消息ID,uuid))
                         try:
-                            sock.sendall(assembled)
+                            套接字.sendall(组装数据)
                         except Exception:
                             # 发送失败 -> 关闭该连接
                             try:
-                                sock.close()
+                                套接字.close()
                             except: pass
-                            with conns_lock:
-                                conns.pop((conn_id,uuid), None)
+                            with 连接锁:
+                                连接字典.pop((连接ID,uuid), None)
                 else:
-                    print(f"没有找到 {conn_id} 的mc连接")
+                    print(f"没有找到 {连接ID} 的MC连接")
 
-            elif t == TYPE_CLOSE:
-                # Relay 告知后端关闭
-                if sock:
+            elif 类型 == 类型_关闭:
+                # 中继告知后端关闭
+                if 套接字:
                     try:
-                        sock.close()
+                        套接字.close()
                     except: pass
-                    with conns_lock:
-                        conns.pop((conn_id,uuid), None)
-                    print(f"[local] 收到 CLOSE for conn {conn_id}, 已关闭本地 TCP")
+                    with 连接锁:
+                        连接字典.pop((连接ID,uuid), None)
+                    print(f"[本地] 收到关闭请求 for conn {连接ID}, 已关闭本地 TCP")
 
-            elif t == TYPE_ACK:
-                with msg_lock:
-                    if (conn_id, msg_id, seq ,uuid) in pending:
-                        del pending[(conn_id, msg_id, seq, uuid)]
+            elif 类型 == 类型_确认:
+                with 消息锁:
+                    if (连接ID, 消息ID, 序号 ,uuid) in 待确认包:
+                        del 待确认包[(连接ID, 消息ID, 序号, uuid)]
         except Exception:
             traceback.print_exc()
 
 
-def mark_completed(msg_id):
-    completed_msgs[msg_id] = time.time()
-    completed_msgs.move_to_end(msg_id)
+def 标记完成(消息ID):
+    已完成消息[消息ID] = time.time()
+    已完成消息.move_to_end(消息ID)
 
 
-def handle_client(conn_sock, client_addr, conn_id, uuid):
-    msg_id_s[(conn_id,uuid)] = 1
-    """从 TCP 客户端读数据，发到 Relay（UDP）"""
-    print(f"[local] 新客户端 {client_addr} -> conn_id {conn_id}")
+def 处理客户端(连接套接字, 客户端地址, 连接ID, uuid):
+    消息ID字典[(连接ID,uuid)] = 1
+    """从 TCP 客户端读数据，发到中继服务（UDP）"""
+    print(f"[本地] 新客户端 {客户端地址} -> conn_id {连接ID}")
     try:
         while True:
-            data = conn_sock.recv(65536)
-            if not data:
-                # 客户端关闭，通知 Relay 关闭后端连接
-                p2pExample.sock.sendto(struct.pack(HEADER_FMT, TYPE_CLOSE, conn_id, 0, 0, 0,uuid), RELAY_UDP_ADDR)
+            数据 = 连接套接字.recv(65536)
+            if not 数据:
+                # 客户端关闭，通知中继关闭后端连接
+                p2p实例.套接字.sendto(struct.pack(头部格式, 类型_关闭, 连接ID, 0, 0, 0,uuid), 中继UDP地址)
                 break
-            send_fragmented(conn_id, data,uuid)
+            发送分片数据(连接ID, 数据,uuid)
     except:pass
     finally:
         try:
-            conn_sock.close()
+            连接套接字.close()
         except: pass
-        with conns_lock:
-            conns.pop((conn_id,uuid), None)
-            msg_id_s.pop((conn_id,uuid),None)
-        print(f"conn_id: {conn_id} 关闭")
+        with 连接锁:
+            连接字典.pop((连接ID,uuid), None)
+            消息ID字典.pop((连接ID,uuid),None)
+        print(f"conn_id: {连接ID} 关闭")
 
 
-def accept_loop():
-    uuid=p2pExample.uuid.bytes
+def 接受循环():
+    uuid=p2p实例.uuid.bytes
     while True:
-        sock, addr = tcp_listener.accept()
-        conn_id = gen_conn_id()
-        with conns_lock:
-            conns[(conn_id,uuid)] = sock
-        t = threading.Thread(target=handle_client, args=(sock, addr, conn_id, uuid), daemon=True)
+        套接字, 地址 = tcp监听器.accept()
+        连接ID = 生成连接ID()
+        with 连接锁:
+            连接字典[(连接ID,uuid)] = 套接字
+        t = threading.Thread(target=处理客户端, args=(套接字, 地址, 连接ID, uuid), daemon=True)
         t.start()
 
-def cleanup_loop():
-    """定期清理过期 completed_msgs，但保留最后一个"""
+def 清理循环():
+    """定期清理过期已完成消息，但保留最后一个"""
     while True:
-        now = time.time()
-        keys = list(completed_msgs.keys())
-        for k in keys[:-1]:  # 保留最后一个
-            if now - completed_msgs[k] > 30:
-                del completed_msgs[k]
+        当前时间 = time.time()
+        键列表 = list(已完成消息.keys())
+        for k in 键列表[:-1]:  # 保留最后一个
+            if 当前时间 - 已完成消息[k] > 30:
+                del 已完成消息[k]
         time.sleep(5)
 
 if __name__ == "__main__":
-    print("[local] 启动 local proxy")
-    threading.Thread(target=resend_loop, daemon=True).start()
+    print("[本地] 启动客户端代理")
+    threading.Thread(target=重发循环, daemon=True).start()
     for i in range(10):
-        threading.Thread(target=udp_recv_loop, daemon=True).start()
-    threading.Thread(target=cleanup_loop, daemon=True).start()
-    accept_loop()
+        threading.Thread(target=udp接收循环, daemon=True).start()
+    threading.Thread(target=清理循环, daemon=True).start()
+    接受循环()
